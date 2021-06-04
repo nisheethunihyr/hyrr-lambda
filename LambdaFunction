@@ -1,0 +1,92 @@
+import os
+import boto3
+import requests
+import json
+import base64
+
+def lambda_handler(event, context):
+	s3 = boto3.client('s3', aws_access_key_id=os.getenv("ACCESS_KEY"),  aws_secret_access_key=os.getenv("SECRET_KEY"))
+	input = event['Records'][0]['Sns']['Message']
+	inputJson = json.loads(input)
+	videoType = inputJson["videoType"]
+	id = inputJson["id"]
+	key = inputJson["fileName"] 
+	lambda_file_path=f'/tmp/{key}'
+	lambda_tmpVideo_file_path='/tmp/tempVideo.mp4'
+	lambda_tmpAudio_file_path='/tmp/tempAudio.wav'
+	lambda_tmpIncAudio_file_path='/tmp/tempIncAudio.wav'
+	lambda_doc_file_path='/tmp/doc.prof'
+	lambda_cleanAudio_file_path='/tmp/tempcleanAudio.wav'
+	lambda_output_file_path='/tmp/Trans.mp4'
+	lambda_low_resolution_file_path='/tmp/lowResolution.mp4'
+	lambda_standard_resolution_file_path='/tmp/standardResolution.mp4'
+	if os.path.exists(lambda_file_path):
+		os.remove(lambda_file_path)
+	if os.path.exists(lambda_tmpVideo_file_path):
+		os.remove(lambda_tmpVideo_file_path)
+	if os.path.exists(lambda_tmpAudio_file_path):
+		os.remove(lambda_tmpAudio_file_path)
+	if os.path.exists(lambda_tmpIncAudio_file_path):
+		os.remove(lambda_tmpIncAudio_file_path)
+	if os.path.exists(lambda_doc_file_path):
+		os.remove(lambda_doc_file_path)
+	if os.path.exists(lambda_cleanAudio_file_path):
+		os.remove(lambda_cleanAudio_file_path)
+	if os.path.exists(lambda_output_file_path):
+		os.remove(lambda_output_file_path)
+	if os.path.exists(lambda_low_resolution_file_path):
+		os.remove(lambda_low_resolution_file_path)
+	if os.path.exists(lambda_standard_resolution_file_path):
+		os.remove(lambda_standard_resolution_file_path)
+	s3.download_file(os.getenv("SOURCE"), key, lambda_file_path)
+	os.system(f'/opt/ffmpeglib/ffmpeg -i {lambda_file_path} -vcodec copy -an {lambda_tmpVideo_file_path}')
+	os.system(f'/opt/ffmpeglib/ffmpeg -i {lambda_file_path} -acodec pcm_s16le -vn {lambda_tmpAudio_file_path}')
+	os.system(f'/opt/ffmpeglib/ffmpeg -i {lambda_tmpAudio_file_path} -filter:a volume=1.4 {lambda_tmpIncAudio_file_path}')
+	os.system(f'/opt/soxlib/sox {lambda_tmpIncAudio_file_path} -n noiseprof {lambda_doc_file_path}')
+	os.system(f'/opt/soxlib/sox {lambda_tmpIncAudio_file_path} {lambda_cleanAudio_file_path} noisered {lambda_doc_file_path} 0.15')
+	os.system(f'/opt/ffmpeglib/ffmpeg -i {lambda_tmpVideo_file_path} -i {lambda_cleanAudio_file_path} -map 0:v -map 1:a -c:v copy -c:a aac -b:a 128k {lambda_output_file_path}')
+	s3.upload_file(Bucket=os.getenv("DESTINATION"), Key=key+'-trans', Filename=lambda_output_file_path)
+	
+	#url = s3.generate_presigned_url(
+	#    ClientMethod='get_object',
+	#    Params={
+	#        'Bucket': os.getenv("DESTINATION"),
+	#        'Key': key
+	#    },
+    #)
+    
+	api = os.getenv("SERVICE_URL")+'/v1/lambda/update/url'
+	body = {'videoType': videoType, 'id': id, 'url' : os.getenv("DOMAIN_NAME")+key+'-trans'}
+	message_bytes = os.getenv("AUTH").encode('ascii')
+	base64_bytes = base64.b64encode(message_bytes)
+	auth = base64_bytes.decode('ascii')
+	print(requests.post(api, json = body, headers = {'authorization': auth}))
+	
+	try :
+		with os.popen(f'/opt/ffprobelib/ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=s=x:p=0 {lambda_output_file_path}') as w :
+			widthList = [line.rstrip('\n') for line in w]
+			width = int(widthList[0])
+		with os.popen(f'/opt/ffprobelib/ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=s=x:p=0 {lambda_output_file_path}') as h :
+			heightList = [line.rstrip('\n') for line in h]
+			height = int(heightList[0])
+		if(width >=1280 and height >= 720) :
+			os.system(f'/opt/ffmpeglib/ffmpeg -i {lambda_output_file_path} -vf scale=176:144 {lambda_low_resolution_file_path}')
+			s3.upload_file(Bucket=os.getenv("DESTINATION"), Key=key+'_L', Filename=lambda_low_resolution_file_path)
+			lowResolutionUrl = os.getenv("DOMAIN_NAME")+key+'_L'
+			os.system(f'/opt/ffmpeglib/ffmpeg -i {lambda_output_file_path} -vf scale=640:480 {lambda_standard_resolution_file_path}')
+			s3.upload_file(Bucket=os.getenv("DESTINATION"), Key=key+'_M', Filename=lambda_standard_resolution_file_path)
+			standardResolutionUrl = os.getenv("DOMAIN_NAME")+key+'_M'
+			body = {'videoType': videoType, 'id': id, 'urlLR' : lowResolutionUrl, 'urlMR' : standardResolutionUrl, 'urlHR' : key}
+			print(requests.post(api, json = body, headers = {'authorization': auth}))
+		elif(width >=640 and height >= 480) :
+			os.system(f'/opt/ffmpeglib/ffmpeg -i {lambda_output_file_path} -vf scale=176:144 {lambda_low_resolution_file_path}')
+			s3.upload_file(Bucket=os.getenv("DESTINATION"), Key=key+'_L', Filename=lambda_low_resolution_file_path)
+			standardResolutionUrl = os.getenv("DOMAIN_NAME")+key+'_L'
+			body = {'videoType': videoType, 'id': id, 'urlLR' : lowResolutionUrl, 'urlMR' : key}
+			print(requests.post(api, json = body, headers = {'authorization': auth}))
+		else:
+			body = {'videoType': videoType, 'id': id, 'urlLR' : key}
+			print(requests.post(api, json = body, headers = {'authorization': auth}))
+	except:
+		print('Error in creating versions')
+	
