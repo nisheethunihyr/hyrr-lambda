@@ -1,0 +1,45 @@
+import os
+import boto3
+import requests
+import json
+import base64
+
+def lambda_handler(event, context):
+	try : 
+		s3Client = boto3.client('s3')
+		lambda_output_file_path='/tmp/Trans.mp4'
+		lambda_watermark_path=f'/tmp/watermark.png'
+		lambda_watermark_output_path='/tmp/waterMarkedTrans.mp4'
+		if os.path.exists(lambda_output_file_path):
+			os.remove(lambda_output_file_path)
+		if os.path.exists(lambda_watermark_path):
+			os.remove(lambda_watermark_path)
+		if os.path.exists(lambda_watermark_output_path):
+			os.remove(lambda_watermark_output_path)
+		#key = 'Trans_70cb1f1a-7dcb-4c78-8f3c-0aa361a5f62d1623046787485.mp4'
+		key = event['key']
+		s3Client.download_file(os.getenv("DESTINATION"), key, lambda_output_file_path)
+		with os.popen(f'/opt/ffprobelib/ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 {lambda_output_file_path}') as res :
+			resList = [line.rstrip('\n') for line in res]
+			resolution = resList[0].split("x")
+			width = int(resolution[0])
+			height = int(resolution[1])
+		if((width >=1280 and height >= 720) or (height >=1280 and width >= 720)) :
+			s3Client.download_file(os.getenv("SOURCE"), 'hyrr_logo-100x60.png', lambda_watermark_path)
+		elif((width >=640 and height >= 480) or (height >=640 and width >= 480)) :
+			s3Client.download_file(os.getenv("SOURCE"), 'hyrr_logo-80x20.png', lambda_watermark_path)
+		else :
+			s3Client.download_file(os.getenv("SOURCE"), 'hyrr_logo-35x8.png', lambda_watermark_path)
+		os.system(f'/opt/ffmpeglib/ffmpeg -i {lambda_output_file_path} -i {lambda_watermark_path} -filter_complex "overlay=main_w-overlay_w-5:main_h-overlay_h-5" -codec:a copy -preset ultrafast -async 1 {lambda_watermark_output_path}')
+		s3Client.upload_file(Bucket=os.getenv("DESTINATION"), Key=key, Filename=lambda_watermark_output_path)
+	except:
+		print('Error in adding watermark')
+	invokeLambda = boto3.client('lambda')
+	paylod = {'key': key, 'videoType': event['videoType'], 'id': event['id']}
+	#paylod = {'key': key, 'videoType': 'intro', 'id': '0f8f0fe1-84ae-43ee-b8d2-1f68af34b614'}
+	invokeLambda.invoke(
+		FunctionName = 'arn:aws:lambda:ap-south-1:558940348951:function:createVideoVersions',
+		InvocationType = 'Event',
+		Payload = json.dumps(paylod)
+	)
+	

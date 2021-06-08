@@ -1,0 +1,53 @@
+import os
+import boto3
+import requests
+import json
+import base64
+
+def lambda_handler(event, context):
+	s3 = boto3.client('s3')
+	lambda_output_file_path='/tmp/Trans.mp4'
+	lambda_low_resolution_file_path='/tmp/lowResolution.mp4'
+	lambda_standard_resolution_file_path='/tmp/standardResolution.mp4'
+	lambda_watermark_path=f'/tmp/watermark.png'
+	lambda_watermark_output_path='/tmp/waterMarkedTrans.mp4'
+	if os.path.exists(lambda_output_file_path):
+		os.remove(lambda_output_file_path)
+	if os.path.exists(lambda_low_resolution_file_path):
+		os.remove(lambda_low_resolution_file_path)
+	if os.path.exists(lambda_standard_resolution_file_path):
+		os.remove(lambda_standard_resolution_file_path)
+	#key = '00151110-4fbe-4395-b48e-8289851545241622269499634.mp4-trans'
+	api = os.getenv("SERVICE_URL")+'/v1/lambda/update/url'
+	message_bytes = os.getenv("AUTH").encode('ascii')
+	base64_bytes = base64.b64encode(message_bytes)
+	auth = base64_bytes.decode('ascii')
+	key = event['key']
+	videoType = event['videoType']
+	id = event['id']
+	s3.download_file(os.getenv("DESTINATION"), key, lambda_output_file_path)
+	with os.popen(f'/opt/ffprobelib/ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 {lambda_output_file_path}') as res :
+		resList = [line.rstrip('\n') for line in res]
+		resolution = resList[0].split("x")
+		width = int(resolution[0])
+		height = int(resolution[1])
+	defaultVideoUrl = os.getenv("DOMAIN_NAME")+key
+	if((width >=1280 and height >= 720) or (height >=1280 and width >= 720)) :
+		os.system(f'/opt/ffmpeglib/ffmpeg -i {lambda_output_file_path} -vf scale=176:144 -preset:v veryfast {lambda_low_resolution_file_path}')
+		s3.upload_file(Bucket=os.getenv("DESTINATION"), Key='LR_'+key, Filename=lambda_low_resolution_file_path)
+		lowResolutionUrl = os.getenv("DOMAIN_NAME")+'LR_'+key
+		os.system(f'/opt/ffmpeglib/ffmpeg -i {lambda_output_file_path} -vf scale=640:480 -preset:v veryfast {lambda_standard_resolution_file_path}')
+		s3.upload_file(Bucket=os.getenv("DESTINATION"), Key='MR_'+key, Filename=lambda_standard_resolution_file_path)
+		standardResolutionUrl = os.getenv("DOMAIN_NAME")+'MR_'+key
+		body = {'videoType': videoType, 'id': id, 'urlLR' : lowResolutionUrl, 'urlMR' : standardResolutionUrl, 'urlHR' : defaultVideoUrl}
+		print(requests.post(api, json = body, headers = {'authorization': auth}))
+	elif((width >=640 and height >= 480) or (height >=640 and width >= 480)) :
+		os.system(f'/opt/ffmpeglib/ffmpeg -i {lambda_output_file_path} -vf scale=176:144 -preset:v veryfast {lambda_low_resolution_file_path}')
+		s3.upload_file(Bucket=os.getenv("DESTINATION"), Key='LR_'+key, Filename=lambda_low_resolution_file_path)
+		lowResolutionUrl = os.getenv("DOMAIN_NAME")+'LR_'+key
+		body = {'videoType': videoType, 'id': id, 'urlLR' : lowResolutionUrl, 'urlMR' : defaultVideoUrl}
+		print(requests.post(api, json = body, headers = {'authorization': auth}))
+	else:
+		body = {'videoType': videoType, 'id': id, 'urlLR' : defaultVideoUrl}
+		print(requests.post(api, json = body, headers = {'authorization': auth}))
+	

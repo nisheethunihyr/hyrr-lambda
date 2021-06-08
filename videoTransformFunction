@@ -1,0 +1,69 @@
+import os
+import boto3
+import requests
+import json
+import base64
+
+def lambda_handler(event, context):
+	s3 = boto3.client('s3', aws_access_key_id=os.getenv("ACCESS_KEY"),  aws_secret_access_key=os.getenv("SECRET_KEY"))
+	input = event['Records'][0]['Sns']['Message']
+	inputJson = json.loads(input)
+	videoType = inputJson["videoType"]
+	id = inputJson["id"]
+	key = inputJson["fileName"] 
+	#videoType = 'Intro'
+	#id = '0f8f0fe1-84ae-43ee-b8d2-1f68af34b614'
+	#key = 'ed734a60-b72f-4338-96e8-917291c146971622808390529.mp4' 
+	lambda_file_path=f'/tmp/{key}'
+	lambda_tmpVideo_file_path='/tmp/tempVideo.mp4'
+	lambda_tmpAudio_file_path='/tmp/tempAudio.wav'
+	lambda_tmpIncAudio_file_path='/tmp/tempIncAudio.wav'
+	lambda_doc_file_path='/tmp/doc.prof'
+	lambda_cleanAudio_file_path='/tmp/tempcleanAudio.wav'
+	lambda_output_file_path='/tmp/Trans.mp4'
+	if os.path.exists(lambda_file_path):
+		os.remove(lambda_file_path)
+	if os.path.exists(lambda_tmpVideo_file_path):
+		os.remove(lambda_tmpVideo_file_path)
+	if os.path.exists(lambda_tmpAudio_file_path):
+		os.remove(lambda_tmpAudio_file_path)
+	if os.path.exists(lambda_tmpIncAudio_file_path):
+		os.remove(lambda_tmpIncAudio_file_path)
+	if os.path.exists(lambda_doc_file_path):
+		os.remove(lambda_doc_file_path)
+	if os.path.exists(lambda_cleanAudio_file_path):
+		os.remove(lambda_cleanAudio_file_path)
+	if os.path.exists(lambda_output_file_path):
+		os.remove(lambda_output_file_path)
+	s3.download_file(os.getenv("SOURCE"), key, lambda_file_path)
+	fileName = key.split(".")
+	
+	# increase audio and reduce noise
+	os.system(f'/opt/ffmpeglib/ffmpeg -i {lambda_file_path} -vcodec copy -an {lambda_tmpVideo_file_path}')
+	os.system(f'/opt/ffmpeglib/ffmpeg -i {lambda_file_path} -acodec pcm_s16le -vn {lambda_tmpAudio_file_path}')
+	os.system(f'/opt/ffmpeglib/ffmpeg -i {lambda_tmpAudio_file_path} -filter:a volume=1.4 {lambda_tmpIncAudio_file_path}')
+	os.system(f'/opt/soxlib/sox {lambda_tmpIncAudio_file_path} -n noiseprof {lambda_doc_file_path}')
+	os.system(f'/opt/soxlib/sox {lambda_tmpIncAudio_file_path} {lambda_cleanAudio_file_path} noisered {lambda_doc_file_path} 0.15')
+	s3.upload_file(Bucket=os.getenv("DESTINATION"), Key='Audio_'+fileName[0]+'.wav', Filename=lambda_cleanAudio_file_path)
+	os.system(f'/opt/ffmpeglib/ffmpeg -i {lambda_tmpVideo_file_path} -i {lambda_cleanAudio_file_path} -map 0:v -map 1:a -c:v copy -c:a aac -b:a 128k {lambda_output_file_path}')
+	s3.upload_file(Bucket=os.getenv("DESTINATION"), Key='Trans_'+key, Filename=lambda_output_file_path)
+	
+	# update video url in backend
+	api = os.getenv("SERVICE_URL")+'/v1/lambda/update/url'
+	defaultVideoUrl = os.getenv("DOMAIN_NAME")+'Trans_'+key
+	audioUrl = os.getenv("DOMAIN_NAME")+'Audio_'+fileName[0]+'.wav'
+	body = {'videoType': videoType, 'id': id, 'url' : defaultVideoUrl, 'urlAudio' : audioUrl }
+	message_bytes = os.getenv("AUTH").encode('ascii')
+	base64_bytes = base64.b64encode(message_bytes)
+	auth = base64_bytes.decode('ascii')
+	print(requests.post(api, json = body, headers = {'authorization': auth}))
+	
+	# call another lambda function for creating different resolution videos
+	invokeLambda = boto3.client('lambda')
+	paylod = {'key': 'Trans_'+key, 'videoType': videoType, 'id': id}
+	invokeLambda.invoke(
+		FunctionName = 'arn:aws:lambda:ap-south-1:558940348951:function:watermarkLogoInVideo',
+		InvocationType = 'Event',
+		Payload = json.dumps(paylod)
+	)
+	
